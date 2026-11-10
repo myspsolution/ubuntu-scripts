@@ -19,7 +19,7 @@
 # Example cron (root crontab, daily 02:12, conditional restart):
 #   12 2 * * * /usr/bin/bash /opt/scripts/ubuntu-update.sh
 # Example cron (sudoer with NOPASSWD, forced daily restart):
-#   12 2 * * * /usr/bin/bash /home/orangt/ubuntu-update.sh --restart
+#   12 2 * * * /usr/bin/bash /home/adminuic/ubuntu-update.sh --restart
 #
 # Log: /var/log/daily-update.log (rotated to .1 when larger than 10 MB)
 #

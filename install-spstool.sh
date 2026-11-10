@@ -1,332 +1,195 @@
 #!/usr/bin/env bash
+#
+# install-spstool.sh
+# Install (or update) spstool for ALL users on this server:
+#   - downloads spstool.sh from github.com/myspsolution/ubuntu-scripts
+#   - installs it as /usr/local/bin/spstool (overwrites an older version)
+#   - shows "spstool sysinfo" at every interactive login (/etc/profile.d/spstool.sh)
+#   - creates /etc/spstool.conf with examples, only if it does not exist yet
+#
+# Run it as any sudoer (or root). Safe to run more than once.
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/myspsolution/ubuntu-scripts/main/install-spstool.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/myspsolution/ubuntu-scripts/main/install-spstool.sh | bash -s -- --uninstall
+#
+# Prepared by dicky.dwijanto@myspsolution.com
+# Last update: 2026-11-11
+#
+# The whole script is wrapped in main(), which runs on the last line.
+# If the download is cut off halfway, nothing runs at all.
 
-# 03-install-spstool.sh
-# Install spstool and its dependencies for the configured sudo user.
-# Revised: 2026-10-30 11-32-56
-# prepared by dicky.dwijanto@myspsolution.com
-# Usage: bash 03-install-spstool.sh
-
-if [ -z "${BASH_VERSION:-}" ]; then
-  printf '%s\n' 'Error: run this script with bash, not another shell.' >&2
-  exit 1
-fi
-
-if shopt -oq posix; then
-  printf '%s\n' 'Error: run this script with bash, not sh or Bash POSIX mode.' >&2
-  exit 1
-fi
-
-set -Eeuo pipefail
-
-readonly RED="\033[1;41;37m"
-readonly YLW="\033[1;33m"
-readonly STD="\033[0m"
-readonly BLD="\033[1;97m"
-
-readonly CONFIG_FILE="/etc/orangt.conf"
-readonly SPSTOOL_REPOSITORY="https://github.com/myspsolution/spstool.git"
-readonly REQUIRED=(bc curl git ncat)
-
-MISSING=()
-OS_INFO=""
-SUDO_BIN=""
-SUDO_OPTIONS=()
-USER_HOME=""
-SPSTOOL_STAGE_DIR=""
-SPSTOOL_PAYLOAD=()
-
-# Color only human-facing terminal output; leave redirected output plain.
-message() {
-  local message_kind="$1"
-  local message_text="$2"
-  local message_color="$BLD"
-  local message_reset="$STD"
-  local message_label=""
-  local message_end=$'\n'
-  local message_fd=1
-
-  case "$message_kind" in
-    error)
-      message_color="$RED"
-      message_label='ERROR:'
-      message_text=" $message_text"
-      message_fd=2
-      ;;
-    warning)
-      message_color="$YLW"
-      message_label='WARNING:'
-      message_text=" $message_text"
-      message_fd=2
-      ;;
-    prompt)
-      message_label="$message_text"
-      message_text=""
-      message_end=' '
-      message_fd=2
-      ;;
-    info)
-      message_label="$message_text"
-      message_text=""
-      ;;
-  esac
-
-  if [[ ! -t "$message_fd" || "${TERM:-dumb}" == 'dumb' || -n "${NO_COLOR:-}" ]]; then
-    message_color=""
-    message_reset=""
-  fi
-
-  printf '%b%s%b%s%s' "$message_color" "$message_label" "$message_reset" "$message_text" "$message_end" >&"$message_fd"
-}
-
-info() {
-  message info "$*"
-}
-
-warn() {
-  message warning "$*"
-}
-
-error() {
-  message error "$*"
-}
-
-configure_privilege() {
-  if (( EUID == 0 )); then
-    command -v runuser >/dev/null 2>&1 || {
-      error 'Root execution requires runuser to clone files as the configured account.'
-      exit 1
-    }
-    return
-  fi
-
-  SUDO_BIN=$(type -P sudo || true)
-  [[ -n "$SUDO_BIN" ]] || {
-    error 'This installer requires root access or an authorized sudo account.'
-    printf '%s\n' 'Start an authorized session, then run: bash 03-install-spstool.sh' >&2
+main() {
+  if [ -z "${BASH_VERSION:-}" ]; then
+    printf '%s\n' 'Error: run this script with bash, not sh.' >&2
     exit 1
+  fi
+  set -Eeuo pipefail
+  umask 022
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  local REPO_RAW='https://raw.githubusercontent.com/myspsolution/ubuntu-scripts/main'
+  local SOURCE_URL="${REPO_RAW}/spstool.sh"
+  local TARGET='/usr/local/bin/spstool'
+  local PROFILE_HOOK='/etc/profile.d/spstool.sh'
+  local CONFIG_FILE='/etc/spstool.conf'
+  local LEGACY_FILES=(/usr/local/bin/spstool.sh /tmp/03-install-spstool.sh)
+
+  # ---------- Appearance ----------
+  local RED='' GRN='' YLW='' CYN='' STD=''
+  if [[ -t 1 && "${TERM:-dumb}" != 'dumb' && -z "${NO_COLOR:-}" ]]; then
+    RED=$'\033[1;31m'; GRN=$'\033[1;32m'; YLW=$'\033[1;33m'
+    CYN=$'\033[1;36m'; STD=$'\033[0m'
+  fi
+  step() { printf '\n%s[%s]%s %s\n' "$CYN" "$1" "$STD" "$2"; }
+  ok()   { printf '  %s✔%s %s\n' "$GRN" "$STD" "$*"; }
+  note() { printf '  %s\n' "$*"; }
+  warn() { printf '  %s! %s%s\n' "$YLW" "$*" "$STD" >&2; }
+  fail() { printf '\n%sERROR:%s %s\n' "$RED" "$STD" "$*" >&2; exit 1; }
+
+  # ---------- Options ----------
+  local MODE='install' ARG
+  for ARG in "$@"; do
+    case "$ARG" in
+      --uninstall) MODE='uninstall' ;;
+      -h|--help)
+        printf '%s\n' 'Usage: install-spstool.sh [--uninstall]' \
+          '  (no option)   install or update spstool for all users' \
+          '  --uninstall   remove spstool and its login summary (keeps /etc/spstool.conf)'
+        return 0 ;;
+      *) fail "Unknown option: ${ARG} (see --help)" ;;
+    esac
+  done
+
+  # ---------- Privileges: run each admin step with sudo, nothing else ----------
+  as_root() {
+    if (( EUID == 0 )); then "$@"; else sudo "${SUDO_OPTS[@]}" -- "$@"; fi
   }
 
-  # Never request a sudo password; required commands must already be authorized.
-  SUDO_OPTIONS=(-n)
+  local WORKDIR=''
+  cleanup() {
+    local dir="${WORKDIR:-}"
+    [[ -n "$dir" && -d "$dir" ]] && rm -rf -- "$dir"
+    return 0
+  }
+  trap cleanup EXIT
+  trap 'fail "Unexpected problem at line $LINENO. You can safely run this script again."' ERR
 
-}
+  # ================================================================
+  step '1/4' 'Checking this server'
+  local os_name=''
+  os_name=$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-}") || true
+  [[ "${os_name,,}" == *ubuntu* ]] || fail "This script supports Ubuntu only. Detected: ${os_name:-unknown}"
+  ok "Operating system: ${os_name}"
 
-require_sudo_command() {
+  local SUDO_OPTS=()
   if (( EUID == 0 )); then
-    return
+    ok 'Running as root'
+  else
+    command -v sudo >/dev/null 2>&1 || fail 'This script must be run by a sudoer (or root).'
+    # Without a keyboard (e.g. cron), never wait for a password.
+    (exec </dev/tty) 2>/dev/null || SUDO_OPTS=(-n)
+    note "Your password may be asked, to confirm that $(id -un) can use sudo."
+    sudo "${SUDO_OPTS[@]}" -v || fail 'sudo access is required. Nothing was changed.'
+    ok "sudo access confirmed for $(id -un)"
   fi
 
-  if ! "$SUDO_BIN" "${SUDO_OPTIONS[@]}" -l -- "$@" >/dev/null 2>&1; then
-    error "Sudo cannot run the required command without a password: $*. Use an authorized root session or arrange noninteractive sudo authorization."
-    exit 1
+  # ---------- Uninstall ----------
+  if [[ "$MODE" == uninstall ]]; then
+    step '2/2' 'Removing spstool'
+    as_root rm -f -- "$TARGET" "$PROFILE_HOOK" "${LEGACY_FILES[@]}"
+    ok "Removed ${TARGET} and ${PROFILE_HOOK}"
+    note "Settings kept in ${CONFIG_FILE} (delete it manually if no longer needed)."
+    printf '\n'
+    return 0
   fi
-}
 
-preflight_privileged_commands() {
-  local source_file
-  local installed_source
-  local target_file
+  command -v curl >/dev/null 2>&1 || fail 'curl is required. Install it with: sudo apt install curl'
 
-  require_sudo_command rm -rf -- "/home/${CHECK_USER}/spstool"
-  require_sudo_command rm -f -- /etc/profile.d/spstool.sh
-  require_sudo_command rm -f -- /tmp/03-install-spstool.sh
-  require_sudo_command rm -f -- /usr/local/bin/spstool /usr/local/bin/spstool.sh
-  require_sudo_command mv -- "$SPSTOOL_STAGE_DIR" "$USER_HOME/spstool"
-  for source_file in "${SPSTOOL_PAYLOAD[@]}"; do
-    installed_source="$USER_HOME/spstool/${source_file##*/}"
-    target_file="/usr/local/bin/${source_file##*/}"
-    require_sudo_command cp -- "$installed_source" "$target_file"
-    require_sudo_command chmod +x "$target_file"
-  done
-  require_sudo_command mv -- /usr/local/bin/spstool.sh /usr/local/bin/spstool
-  require_sudo_command tee /etc/profile.d/spstool.sh
-  require_sudo_command chmod +x /etc/profile.d/spstool.sh
-}
-
-preflight_package_bootstrap() {
-  [[ ${#MISSING[@]} -gt 0 ]] || return 0
-
-  require_sudo_command env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Acquire::Retries=3 \
-    -o Acquire::http::Timeout=30 \
-    -o Acquire::https::Timeout=30 \
-    update --error-on=any
-  require_sudo_command env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Acquire::Retries=3 \
-    -o Acquire::http::Timeout=30 \
-    -o Acquire::https::Timeout=30 \
-    install -y "${MISSING[@]}"
-}
-
-apt_update_strict() {
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Acquire::Retries=3 \
-    -o Acquire::http::Timeout=30 \
-    -o Acquire::https::Timeout=30 \
-    update --error-on=any
-}
-
-verify_apt_error_mode() {
-  if ! apt-get update --error-on=any --print-uris >/dev/null 2>&1; then
-    error 'This apt-get version does not support fatal partial-update checking.'
-    printf '%s\n' 'Upgrade APT before running this installer.' >&2
-    exit 1
+  # ---------- [2/4] Download ----------
+  step '2/4' 'Downloading spstool'
+  WORKDIR=$(mktemp -d)
+  curl -fsSL --retry 3 --connect-timeout 15 -o "$WORKDIR/spstool" "$SOURCE_URL" \
+    || fail "Cannot download ${SOURCE_URL}. Check the internet connection, DNS or proxy."
+  # Basic checks before anything is replaced
+  head -1 "$WORKDIR/spstool" | grep -q '^#!.*bash' || fail 'Downloaded file is not a bash script. Nothing was changed.'
+  bash -n "$WORKDIR/spstool" || fail 'Downloaded file has a syntax error. Nothing was changed.'
+  local new_version old_version='(not installed)'
+  new_version=$(grep -m1 -oE "SPSTOOL_VERSION=['\"]?[0-9][0-9.]*" "$WORKDIR/spstool" | grep -oE '[0-9][0-9.]*$') \
+    || fail 'Downloaded file does not look like spstool. Nothing was changed.'
+  if [[ -x "$TARGET" ]]; then
+    old_version=$(grep -m1 -oE "SPSTOOL_VERSION=['\"]?[0-9][0-9.]*" "$TARGET" | grep -oE '[0-9][0-9.]*$') || old_version='unknown'
   fi
-}
+  ok "Downloaded spstool ${new_version} from ${REPO_RAW%/main}"
 
-probe_spstool_repository() {
-  if ! GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --exit-code \
-    "$SPSTOOL_REPOSITORY" HEAD >/dev/null 2>&1; then
-    error "Cannot access required Git repository: ${SPSTOOL_REPOSITORY}"
-    printf '%s\n' 'Check DNS, proxy, TLS trust, GitHub access, and repository permissions.' >&2
-    exit 1
+  # ---------- [3/4] Install ----------
+  step '3/4' 'Installing for all users'
+  # install(1) writes a new file and renames it into place: a running spstool is never half-written.
+  as_root install -m 0755 -o root -g root "$WORKDIR/spstool" "$TARGET"
+  ok "${TARGET}: ${old_version} -> ${new_version}"
+
+  cat > "$WORKDIR/profile-hook" <<'EOF'
+# spstool: show a system summary at every interactive login.
+# Installed by install-spstool.sh (github.com/myspsolution/ubuntu-scripts).
+# To stop it, delete this file: sudo rm /etc/profile.d/spstool.sh
+case $- in
+  *i*) [ -x /usr/local/bin/spstool ] && /usr/local/bin/spstool sysinfo ;;
+esac
+EOF
+  as_root install -m 0644 -o root -g root "$WORKDIR/profile-hook" "$PROFILE_HOOK"
+  ok "Login summary: ${PROFILE_HOOK}"
+
+  if as_root test -e "$CONFIG_FILE"; then
+    ok "Settings kept: ${CONFIG_FILE} (not overwritten)"
+  else
+    cat > "$WORKDIR/spstool.conf" <<'EOF'
+# /etc/spstool.conf - settings for spstool (KEY=value, one per line).
+# Lines starting with # are ignored. Remove the # to use a setting.
+
+# Shown in "spstool sysinfo", e.g. PRODUCTION, STAGING, TRAINING
+#SERVER_ENVIRONMENT=TRAINING
+
+# Usage (%) of CPU, RAM and disk above this value is shown in red
+#RED_THRESHOLD=80
+
+# Fewer CPU cores than this is shown in red
+#MINIMUM_CPU_CORES=2
+
+# Extra services to show, separated by spaces
+#EXTRA_SERVICES=demo-web
+
+# host:port pairs to check in sysinfo, separated by spaces
+#REMOTE_PORTS=172.16.0.3:3306 172.16.0.4:9042
+EOF
+    as_root install -m 0644 -o root -g root "$WORKDIR/spstool.conf" "$CONFIG_FILE"
+    ok "Settings file created: ${CONFIG_FILE}"
   fi
-}
 
-cleanup() {
-  if [[ -n "$SPSTOOL_STAGE_DIR" && -d "$SPSTOOL_STAGE_DIR" ]]; then
-    rm -rf -- "$SPSTOOL_STAGE_DIR"
-  fi
-}
-
-sudo() {
-  if (( EUID == 0 )); then
-    if [[ "${1:-}" == '-u' ]]; then
-      local target_user="$2"
-      shift 2
-      command runuser -u "$target_user" -- "$@"
-    else
-      command "$@"
+  local f
+  for f in "${LEGACY_FILES[@]}"; do
+    if as_root test -e "$f"; then
+      as_root rm -f -- "$f"
+      ok "Old file removed: ${f}"
     fi
-  else
-    command "$SUDO_BIN" "${SUDO_OPTIONS[@]}" "$@"
-  fi
+  done
+  # Old installer cloned github.com/myspsolution/spstool into a home folder. Only report it.
+  local old_clone
+  while IFS= read -r old_clone; do
+    [[ -n "$old_clone" ]] || continue
+    warn "Old copy found (no longer used): ${old_clone%/.git}"
+    warn "Remove it if you wish: sudo rm -rf ${old_clone%/.git}"
+  done < <(as_root find /home /root -maxdepth 3 -type d -path '*/spstool/.git' 2>/dev/null || true)
+
+  # ---------- [4/4] Check ----------
+  step '4/4' 'Checking'
+  hash -r
+  command -v spstool >/dev/null 2>&1 || fail "spstool is not found in PATH. Check that /usr/local/bin is in PATH."
+  ok "$(spstool version) is ready for every user (no sudo needed)"
+  printf '\n'
+  spstool sysinfo || true
+  note "Commands: spstool sysinfo | spstool internet | spstool port <host> <port>"
+  note 'The summary also appears at every new login.'
+  printf '\n'
 }
 
-run_as_user() {
-  local target_user="$1"
-  shift
-
-  if [[ $(id -un) == "$target_user" ]]; then
-    command "$@"
-  elif (( EUID == 0 )); then
-    command runuser -u "$target_user" -- "$@"
-  else
-    command "$SUDO_BIN" "${SUDO_OPTIONS[@]}" -u "$target_user" -- "$@"
-  fi
-}
-
-# ---------------- Starting script ----------------
-
-trap cleanup EXIT
-
-if [[ -f "$CONFIG_FILE" ]]; then
-  while IFS='=' read -r key value; do
-    # Skip empty lines and comments, preserving the original config loader.
-    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-    key="$(printf '%s\n' "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    value="$(printf '%s\n' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    export "$key=$value"
-  done < "$CONFIG_FILE"
-fi
-
-ORANGT_USER="${ORANGT_USER:-orangt}"
-USER="$(id -un)"
-# The original referenced CHECK_USER without providing a default.
-CHECK_USER="${CHECK_USER:-$ORANGT_USER}"
-USER_HOME=$(getent passwd "$ORANGT_USER" | cut -d: -f6)
-
-# ---------------- Preliminary validation ----------------
-
-# The original already-installed check remains disabled: reruns reinstall spstool.
-if (( EUID != 0 )) && [[ "$USER" != "$ORANGT_USER" ]]; then
-  error "Script must be run as user: ${ORANGT_USER}. Exiting."
-  exit 1
-fi
-
-[[ -n "$USER_HOME" && -d "$USER_HOME" ]] || {
-  error "Cannot find the home directory for configured user ${ORANGT_USER}."
-  exit 1
-}
-
-OS_INFO=$(awk -F= '$1 == "PRETTY_NAME" {sub(/^[^=]*=/, ""); gsub(/^"|"$/, ""); print}' /etc/os-release)
-if [[ "${OS_INFO,,}" != *ubuntu* ]]; then
-  error 'This installation script must be run on Ubuntu only.'
-  printf 'Your detected OS: %s\n' "$OS_INFO" >&2
-  exit 1
-fi
-
-configure_privilege
-
-# ---------------- Dependencies and installation ----------------
-
-for cmd in "${REQUIRED[@]}"; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    MISSING+=("$cmd")
-  fi
-done
-
-verify_apt_error_mode
-preflight_package_bootstrap
-
-if [[ ${#MISSING[@]} -gt 0 ]]; then
-  info "The following commands are not installed: ${MISSING[*]}"
-  apt_update_strict
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Acquire::Retries=3 \
-    -o Acquire::http::Timeout=30 \
-    -o Acquire::https::Timeout=30 \
-    install -y "${MISSING[@]}"
-fi
-
-command -v timeout >/dev/null 2>&1 || {
-  error 'The required timeout command is unavailable.'
-  exit 1
-}
-probe_spstool_repository
-
-cd "$USER_HOME"
-
-SPSTOOL_STAGE_DIR=$(run_as_user "$ORANGT_USER" \
-  mktemp -d "${USER_HOME}/.spstool-stage.XXXXXX")
-run_as_user "$ORANGT_USER" git clone --depth 1 \
-  "$SPSTOOL_REPOSITORY" "$SPSTOOL_STAGE_DIR"
-[[ -f "$SPSTOOL_STAGE_DIR/spstool.sh" ]] || {
-  error 'The staged repository does not contain spstool.sh.'
-  exit 1
-}
-mapfile -t SPSTOOL_PAYLOAD < <(find "$SPSTOOL_STAGE_DIR" -maxdepth 1 \
-  -type f -name 'spstool*' -print)
-[[ ${#SPSTOOL_PAYLOAD[@]} -gt 0 ]] || {
-  error 'The staged repository does not contain an spstool payload.'
-  exit 1
-}
-
-preflight_privileged_commands
-
-if [[ -d "/home/${CHECK_USER}/spstool" ]]; then
-  if ! rm -rf "/home/${CHECK_USER}/spstool"; then
-    sudo rm -rf "/home/${CHECK_USER}/spstool"
-  fi
-fi
-
-sudo rm -f /etc/profile.d/spstool.sh
-if ! rm -f /tmp/03-install-spstool.sh; then
-  sudo rm -f /tmp/03-install-spstool.sh
-fi
-sudo mv -- "$SPSTOOL_STAGE_DIR" "$USER_HOME/spstool"
-SPSTOOL_STAGE_DIR=""
-sudo rm -f -- /usr/local/bin/spstool /usr/local/bin/spstool.sh
-for source_file in "${SPSTOOL_PAYLOAD[@]}"; do
-  installed_source="$USER_HOME/spstool/${source_file##*/}"
-  installed_target="/usr/local/bin/${source_file##*/}"
-  sudo cp -- "$installed_source" "$installed_target"
-  sudo chmod +x "$installed_target"
-done
-sudo mv -- /usr/local/bin/spstool.sh /usr/local/bin/spstool
-
-# Keep this generated profile hook sourceable by the login shell.
-printf '#!/bin/bash\n/usr/local/bin/spstool sysinfo\n' | sudo tee /etc/profile.d/spstool.sh >/dev/null
-sudo chmod +x /etc/profile.d/spstool.sh
-
-spstool sysinfo
+main "$@"; exit $?
