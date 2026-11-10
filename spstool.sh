@@ -11,9 +11,9 @@
 # Optional settings: /etc/spstool.conf (KEY=value, see the file for examples)
 #
 # Prepared by dicky.dwijanto@myspsolution.com
-# Last update: 2026-11-11
+# Last update: 2026-11-11 (3.0.0: Java and Sybase/SAP detection)
 
-SPSTOOL_VERSION='2.1.0'
+SPSTOOL_VERSION='3.0.0'
 set -u
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -105,6 +105,105 @@ show_help() {
   echo ""
 }
 
+# Value of KEY="value" from a JDK "release" file
+release_value() { sed -n "s/^$2=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$1" 2>/dev/null | head -1; }
+
+# describe_java HOME_DIR -> "17.0.12|Oracle JDK" ; empty if not a Java home
+describe_java() {
+  local home="$1" rel ver impl build vendor
+  rel="$home/release"
+  [ -r "$rel" ] || rel="$(dirname "$home")/release"     # JRE 8 inside a JDK: jdk/jre
+  [ -r "$rel" ] || return 0
+  ver=$(release_value "$rel" JAVA_VERSION)
+  [ -n "$ver" ] || return 0
+  impl=$(release_value "$rel" IMPLEMENTOR)
+  build=$(release_value "$rel" BUILD_TYPE)
+  case "$impl" in
+    'Oracle Corporation') if [ "$build" = 'commercial' ]; then vendor='Oracle JDK'; else vendor='OpenJDK Oracle build'; fi ;;
+    '')                   if [ "$build" = 'commercial' ]; then vendor='Oracle JDK'; else vendor='OpenJDK'; fi ;;
+    'Eclipse Adoptium')   vendor='OpenJDK Eclipse Temurin' ;;
+    'Azul Systems, Inc.') vendor='OpenJDK Azul Zulu' ;;
+    'Amazon.com Inc.')    vendor='OpenJDK Amazon Corretto' ;;
+    *)                    vendor="OpenJDK ${impl}" ;;
+  esac
+  case "$(release_value "$rel" IMPLEMENTOR_VERSION)" in *GraalVM*) vendor='GraalVM' ;; esac
+  echo "${ver}|${vendor}"
+}
+
+# All Java installations: the default one (in PATH) first, then other JDK/JRE folders
+detect_java() {
+  local seen=' ' java_bin home desc dir rel
+  if java_bin=$(command -v java 2>/dev/null); then
+    home=$(dirname "$(dirname "$(readlink -f "$java_bin")")")
+    desc=$(describe_java "$home")
+    if [ -z "$desc" ]; then
+      # No release file: ask java itself (prints to stderr)
+      local first
+      first=$(java -version 2>&1 | grep -m1 -oE 'version "[^"]+"')
+      first=${first#version \"}; desc=${first%\"}
+      if java -version 2>&1 | grep -q 'Java(TM)'; then desc+='|Oracle JDK'; else desc+='|OpenJDK'; fi
+    fi
+    echo "${desc}|default"
+    seen+="$(readlink -f "$home") "
+  fi
+  while IFS= read -r rel; do
+    dir=$(readlink -f "$(dirname "$rel")")
+    case "$seen" in *" $dir "*) continue ;; esac
+    seen+="$dir "
+    desc=$(describe_java "$dir")
+    [ -n "$desc" ] && echo "${desc}|${dir}"
+  done < <(find /usr/lib/jvm /opt /usr/java /usr/local -maxdepth 3 -name release -type f \
+             -exec grep -l '^JAVA_VERSION=' {} + 2>/dev/null | sort)
+  return 0
+}
+
+# Sybase / SAP database products: ASE, IQ, Replication Server, Open Client, SQL Anywhere.
+# Found by their usual folders (and $SYBASE) plus running processes. No sudo needed.
+detect_sybase() {
+  local roots=() r d name ver product found=' ' args
+  [ -n "${SYBASE:-}" ] && roots+=("$SYBASE")
+  roots+=(/opt/sap /opt/SAP /opt/sybase /sybase /home/sybase /usr/local/sybase)
+  # running NAME PATTERN: a live (non-zombie) process named NAME, or whose command matches PATTERN
+  running() {
+    # NAME and PATTERN go in through the environment, so awk never matches its own command line.
+    ps -eo stat=,comm=,args= 2>/dev/null | N="$1" P="$2" awk '
+      $1 !~ /^Z/ && ($2 == ENVIRON["N"] || $0 ~ ENVIRON["P"]) { found = 1 }
+      END { exit !found }'
+  }
+  add() {   # add "PRODUCT VERSION" PROCESS PATTERN
+    case "$found" in *" $1 "*) return 0 ;; esac
+    found+="$1 "
+    if running "$2" "$3"; then echo "$1|running"; else echo "$1|not running"; fi
+  }
+  for r in "${roots[@]}"; do
+    [ -d "$r" ] || continue
+    for d in "$r"/ASE-* "$r"/IQ-* "$r"/REP-* "$r"/OCS-*; do
+      [ -d "$d" ] || continue
+      name=${d##*/}; ver=${name#*-}; ver=${ver//_/.}
+      case "$name" in
+        ASE-*) add "SAP ASE ${ver}" dataserver '/bin/dataserver' ;;
+        IQ-*)  add "SAP IQ ${ver}" iqsrv16 '/bin(64)?/iqsrv' ;;
+        REP-*) add "SAP Replication Server ${ver}" repserver '/bin/repserver' ;;
+        OCS-*) product="Sybase Open Client ${ver}"; found+="${product} "; echo "${product}|client" ;;
+      esac
+    done
+  done
+  for d in /opt/sqlanywhere* /opt/SQLAnywhere* /opt/sap/sqlanywhere* /opt/sap/SQLAnywhere*; do
+    [ -d "$d" ] || continue
+    ver=$(grep -oE '[0-9]+' <<<"${d##*/}" | head -1)
+    add "SAP SQL Anywhere ${ver}" "dbsrv${ver}" 'dbsrv[0-9]+'
+  done
+  # Running but installed in an unusual folder
+  while IFS= read -r args; do
+    ver=$(grep -oE 'ASE-[0-9_]+' <<<"$args" | head -1); ver=${ver#ASE-}; ver=${ver//_/.}
+    add "SAP ASE${ver:+ $ver}" dataserver '/bin/dataserver'
+  done < <(ps -eo stat=,comm=,args= 2>/dev/null | awk '$1 !~ /^Z/ && $2 == "dataserver" { $1 = ""; $2 = ""; print }')
+  if running dbsrv 'dbsrv[0-9]+' && [[ "$found" != *'SQL Anywhere'* ]]; then
+    add 'SAP SQL Anywhere' x 'dbsrv[0-9]+'
+  fi
+  return 0
+}
+
 #-------------------------------------------------------------------------------
 # Commands
 #-------------------------------------------------------------------------------
@@ -167,7 +266,7 @@ cmd_sysinfo() {
     user_label="(regular user, not a sudoer)"
   fi
 
-  local env_label='(undefined)'
+  local env_label="(undefined) ${YLW}set it in ${CONFIG_FILE}, e.g. SERVER_ENVIRONMENT=PRODUCTION${STD}"
   [ -n "$SERVER_ENVIRONMENT" ] && env_label="${BLD}${YLW}${SERVER_ENVIRONMENT}${STD}"
 
   # CPU: cores and current usage (two /proc/stat samples, 0.5 s apart)
@@ -230,6 +329,21 @@ cmd_sysinfo() {
     components+=("${BLD}mysql ${v}${STD}")
   fi
 
+  # Java and Sybase/SAP (each line shown only when something is found)
+  local javas=() jver jvendor jwhere
+  while IFS='|' read -r jver jvendor jwhere; do
+    [ -n "$jver" ] && javas+=("${BLD}java ${jver}${STD} (${jvendor}, ${jwhere})")
+  done < <(detect_java)
+  local sybases=() product state
+  while IFS='|' read -r product state; do
+    [ -n "$product" ] || continue
+    case "$state" in
+      running)       sybases+=("${BLD}${product} ${BLU}(running)${STD}") ;;
+      'not running') sybases+=("${BLD}${product} ${RED}(not running)${STD}") ;;
+      *)             sybases+=("${BLD}${product}${STD}") ;;
+    esac
+  done < <(detect_sybase)
+
   # Installed services (one systemctl call to list them, then their state)
   local services=() service_note='' installed='' name state
   if has systemctl && installed=$(systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null) \
@@ -276,7 +390,7 @@ cmd_sysinfo() {
   local reboot_label="${BLU}no${STD}"
   [ -f /var/run/reboot-required ] && reboot_label="${YLW}yes${STD}, run ${BLD}sudo reboot${STD} when convenient"
 
-  join() { local IFS=','; local s="$*"; echo "${s//,/, }"; }
+  join() { local out='' item; for item in "$@"; do out+="${out:+, }${item}"; done; echo "$out"; }
 
   [ "${1:-}" = 'clear' ] && [ -t 1 ] && clear
 
@@ -295,6 +409,8 @@ cmd_sysinfo() {
   else
     echo -e "Installed Component(s) : (none from listed components)"
   fi
+  [ "${#javas[@]}" -gt 0 ] && echo -e "Java                   : $(join "${javas[@]}")"
+  [ "${#sybases[@]}" -gt 0 ] && echo -e "Sybase / SAP           : $(join "${sybases[@]}")"
   if [ -n "$service_note" ]; then
     echo -e "Installed Service(s)   : ${service_note}"
   elif [ "${#services[@]}" -gt 0 ]; then
