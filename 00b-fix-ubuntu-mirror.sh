@@ -28,7 +28,7 @@
 # Tip: run 00a-disable-ipv6.sh first; a broken IPv6 network also breaks apt.
 #
 # Prepared by dicky.dwijanto@myspsolution.com
-# Last update: 2026-11-11
+# Last update: 2026-11-12
 #
 # The whole script is wrapped in main(), which runs on the last line.
 # If the download is cut off halfway, nothing runs at all.
@@ -145,7 +145,8 @@ main() {
     command -v sudo >/dev/null 2>&1 || fail 'This script must be run by a sudoer (or root).'
     (exec </dev/tty) 2>/dev/null || SUDO_OPTS=(-n)
     note "Your password may be asked, to confirm that $(id -un) can use sudo."
-    sudo "${SUDO_OPTS[@]}" -v || fail 'sudo access is required. Nothing was changed.'
+    # "sudo true", not "sudo -v": -v asks for a password even for NOPASSWD sudoers.
+    sudo "${SUDO_OPTS[@]}" true || fail 'sudo access is required. Nothing was changed.'
     ok "sudo access confirmed for $(id -un)"
   fi
 

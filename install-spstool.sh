@@ -14,7 +14,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/myspsolution/ubuntu-scripts/main/install-spstool.sh | bash -s -- --uninstall
 #
 # Prepared by dicky.dwijanto@myspsolution.com
-# Last update: 2026-11-11
+# Last update: 2026-11-12
 #
 # The whole script is wrapped in main(), which runs on the last line.
 # If the download is cut off halfway, nothing runs at all.
@@ -90,7 +90,8 @@ main() {
     # Without a keyboard (e.g. cron), never wait for a password.
     (exec </dev/tty) 2>/dev/null || SUDO_OPTS=(-n)
     note "Your password may be asked, to confirm that $(id -un) can use sudo."
-    sudo "${SUDO_OPTS[@]}" -v || fail 'sudo access is required. Nothing was changed.'
+    # "sudo true", not "sudo -v": -v asks for a password even for NOPASSWD sudoers.
+    sudo "${SUDO_OPTS[@]}" true || fail 'sudo access is required. Nothing was changed.'
     ok "sudo access confirmed for $(id -un)"
   fi
 

@@ -4,7 +4,7 @@
 # Create a Linux user that logs in with an SSH key (Ed25519), optionally as a sudoer.
 # If the user already exists, offer to create an additional keypair instead.
 #
-# Revised : 2026-11-11
+# Revised : 2026-11-12
 # Based on: create-new-sudoer.sh (2026-10-29)
 # Prepared by dicky.dwijanto@myspsolution.com
 # PT Strategic Partner Solution - 2026
@@ -126,7 +126,8 @@ main() {
   else
     command -v sudo >/dev/null 2>&1 || fail 'This script needs root or sudo access.'
     note "Your password may be asked, to confirm that ${USER:-you} can use sudo."
-    sudo -v || fail 'sudo access is required. Nothing was changed.'
+    # "sudo true", not "sudo -v": -v asks for a password even for NOPASSWD sudoers.
+    sudo true || fail 'sudo access is required. Nothing was changed.'
     ok "sudo access confirmed for ${USER:-current user}"
   fi
 
