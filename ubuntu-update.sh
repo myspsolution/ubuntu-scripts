@@ -24,7 +24,7 @@
 # Log: /var/log/daily-update.log (rotated to .1 when larger than 10 MB)
 #
 # Prepared by dicky.dwijanto@myspsolution.com
-# Last update: 2026-11-11
+# Last update: 2026-11-12
 #
 # The whole script is wrapped in main(), which runs on the last line.
 # If the download is cut off halfway, nothing runs at all.
@@ -96,7 +96,9 @@ EOF
       always) RESTART_ARGS=(--restart) ;;
       never)  RESTART_ARGS=(--no-restart) ;;
     esac
-    if ! sudo "${SUDO_OPTS[@]}" -v; then
+    # "sudo true", not "sudo -v": -v asks for a password whenever ANY sudoers
+    # rule of the user needs one (e.g. %sudo), even if NOPASSWD also applies.
+    if ! sudo "${SUDO_OPTS[@]}" true; then
       echo 'ERROR: sudo access is required. Nothing was changed.' >&2
       return 1
     fi
