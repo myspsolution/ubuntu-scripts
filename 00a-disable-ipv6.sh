@@ -116,10 +116,14 @@ main() {
   else
     command -v sudo >/dev/null 2>&1 || fail 'This script must be run by a sudoer (or root).'
     (exec </dev/tty) 2>/dev/null || SUDO_OPTS=(-n)
-    note "Your password may be asked, to confirm that $(id -un) can use sudo."
     # "sudo true", not "sudo -v": -v asks for a password even for NOPASSWD sudoers.
-    sudo "${SUDO_OPTS[@]}" true || fail 'sudo access is required. Nothing was changed.'
-    ok "sudo access confirmed for $(id -un)"
+    if sudo -n true 2>/dev/null; then
+      ok "sudo access confirmed for $(id -un) (no password needed)"
+    else
+      note "Your sudo password is needed, to confirm that $(id -un) can use sudo."
+      sudo "${SUDO_OPTS[@]}" true || fail 'sudo access is required. Nothing was changed.'
+      ok "sudo access confirmed for $(id -un)"
+    fi
   fi
 
   # ---------- Undo ----------
